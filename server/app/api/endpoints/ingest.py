@@ -31,10 +31,7 @@ def process_pdf(file_path: str, filename: str, clear_store: bool = False):
 
         for page_num, page in enumerate(doc):
             page_text = page.get_text()
-            # Simple header/footer removal heuristic (can be improved)
             lines = page_text.split('\n')
-            # Remove first and last few lines if they look like headers/footers?
-            # For now, let's keep it simple but robust enough
             cleaned_text = "\n".join(lines)
             
             chunks = text_splitter.split_text(cleaned_text)
@@ -54,7 +51,6 @@ def process_pdf(file_path: str, filename: str, clear_store: bool = False):
         
     except Exception as e:
         print(f"Error processing {filename}: {str(e)}")
-        # In a real app, we might want to log this to a DB or notify user
 
 @router.post("/ingest")
 async def ingest_documents(
@@ -71,30 +67,16 @@ async def ingest_documents(
         temp_path = os.path.join(temp_dir, file.filename)
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
-        # Clear existing vector store handled in process_pdf if clear_store=True
-        # We don't need to do it here explicitly if we pass the flag
             
         background_tasks.add_task(process_pdf, temp_path, file.filename, clear_store=True)
         
     
-    # Generate suggested questions
-    questions = []
+async def generate_questions_from_text(text: str) -> List[str]:
     try:
         from langchain_ollama import ChatOllama
         from langchain_core.prompts import ChatPromptTemplate
         from app.core.config import settings
 
-        # Get a snippet of the text for context (first 2000 chars of first file)
-        # In a real app, we might want to sample from all files or use a summary
-        sample_text = ""
-        with open(os.path.join(temp_dir, files[0].filename), "rb") as f:
-             doc = fitz.open(stream=f.read(), filetype="pdf")
-             for page in doc:
-                 sample_text += page.get_text()
-                 if len(sample_text) > 2000:
-                     break
-        
         llm = ChatOllama(
             base_url=settings.OLLAMA_BASE_URL,
             model=settings.CHAT_MODEL,
@@ -111,8 +93,42 @@ async def ingest_documents(
         )
         
         chain = prompt | llm
-        response = await chain.ainvoke({"text": sample_text[:2000]})
-        questions = [q.strip() for q in response.content.split('\n') if q.strip()]
+        response = await chain.ainvoke({"text": text[:2000]})
+        return [q.strip() for q in response.content.split('\n') if q.strip()]
+    except Exception as e:
+        print(f"Error generating questions: {e}")
+        return []
+
+@router.post("/ingest")
+async def ingest_documents(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...)
+):
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    for file in files:
+        if not file.filename.endswith('.pdf'):
+            continue
+            
+        temp_path = os.path.join(temp_dir, file.filename)
+        with open(temp_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        background_tasks.add_task(process_pdf, temp_path, file.filename, clear_store=True)
+        
+    # Generate suggested questions
+    questions = []
+    try:
+        sample_text = ""
+        with open(os.path.join(temp_dir, files[0].filename), "rb") as f:
+             doc = fitz.open(stream=f.read(), filetype="pdf")
+             for page in doc:
+                 sample_text += page.get_text()
+                 if len(sample_text) > 2000:
+                     break
+        
+        questions = await generate_questions_from_text(sample_text)
         
     except Exception as e:
         print(f"Error generating questions: {e}")
@@ -184,19 +200,34 @@ async def ingest_url(
                     f.write(response.content)
                 
                 background_tasks.add_task(process_pdf, temp_path, filename, clear_store=True)
+                
+                # Generate questions for PDF
+                doc = fitz.open(temp_path)
+                sample_text = ""
+                for page in doc:
+                    sample_text += page.get_text()
+                    if len(sample_text) > 2000:
+                        break
+                questions = await generate_questions_from_text(sample_text)
+
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to download PDF: {str(e)}")
     else:
-        # Handle as generic web content
         background_tasks.add_task(process_web_content, url, clear_store=True)
         filename = url
+        
+        # Generate questions for Web Content
+        try:
+            from langchain_community.document_loaders import WebBaseLoader
+            loader = WebBaseLoader(url)
+            docs = loader.load()
+            sample_text = docs[0].page_content[:2000] if docs else ""
+            questions = await generate_questions_from_text(sample_text)
+        except Exception:
+            questions = []
 
     return {
         "status": "processing", 
         "filename": filename,
-        "suggested_questions": [
-            "What is the main topic of this page?",
-            "Summarize the key points.",
-            "What are the conclusions?"
-        ]
+        "suggested_questions": questions[:3]
     }

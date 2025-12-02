@@ -86,9 +86,6 @@ export function useChat() {
 
             const data = await response.json();
 
-            // For URL, we might just use the URL directly if it's accessible, 
-            // or we might need a proxy if CORS is an issue.
-            // For simplicity, let's assume direct access or use the URL provided.
             setCurrentPdfUrl(url);
 
             if (data.suggested_questions) {
@@ -120,7 +117,6 @@ export function useChat() {
     };
 
     const sendMessage = async (content: string) => {
-        // Optimistic update
         const userMessage: Message = { role: 'user', content };
         setMessages(prev => [...prev, userMessage]);
         setIsStreaming(true);
